@@ -1,0 +1,2 @@
+model,configuration,PR-AUC,ROC-AUC,Recall (thr=0.5),Precision (thr=0.5),F1 (thr=0.5),Accuracy (thr=0.5)
+GradientBoosting,all_features,0.6308923156986033,0.8989318295949112,0.4174757281553398,0.8958333333333334,0.5695364238410596,0.9668198060234814

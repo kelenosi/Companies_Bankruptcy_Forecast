@@ -1,0 +1,294 @@
+---
+title: " "
+format:
+  pdf:
+    fontsize: 10pt
+    toc: false
+    number-sections: false
+    geometry: margin=0.8in
+execute:
+  echo: false
+  warning: false
+  message: false
+jupyter: python3
+---
+
+## Project 1 — Bankruptcy Prediction Report
+
+```{python}
+#| label: setup
+#| include: false
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from IPython.display import display, Markdown
+
+# Quarto executes relative to the .qmd location unless configured otherwise.
+# This also supports a render launched from the repository root.
+ROOT = Path.cwd()
+if not (ROOT / 'results' / 'tables').exists():
+    ROOT = ROOT.parent
+TABLES = ROOT / 'results' / 'tables'
+FIGURES = ROOT / 'results' / 'figures'
+FIGURES.mkdir(parents=True, exist_ok=True)
+
+def load_table(filename):
+    path = TABLES / filename
+    if not path.exists():
+        raise FileNotFoundError(f'Missing {path}. Run the modeling notebook to export its CSV results.')
+    return pd.read_csv(path)
+
+def show_table(frame, digits=4):
+    display(Markdown(frame.to_markdown(index=False, floatfmt=f'.{digits}f')))
+
+MODEL_NAMES = {
+    'GradientBoosting': 'Gradient boosting',
+    'RandomForest': 'Random forest',
+    'DecisionTree': 'Decision tree',
+    'SVM': 'SVM',
+    'KNN': 'KNN',
+    'LogisticRegression': 'Logistic regression',
+}
+```
+
+
+## 1. Project topic and motivation
+
+This project investigates **binary classification of corporate bankruptcy two years before the event** using financial statement ratios. Early identification of financial distress may support credit screening and risk monitoring, but missed bankruptcies and false alarms have different practical costs. The central question is whether supervised learning models can discriminate future bankruptcies despite imbalanced classes, missing ratios, and extreme financial values.
+
+## 2. Data source and description
+
+Data come from the [UCI Polish Companies Bankruptcy dataset (ID 365)](https://archive.ics.uci.edu/dataset/365/polish+companies+bankruptcy+data), obtained using the `ucimlrepo` Python package. The full dataset contains 43,405 company observations across five forecasting horizons. The analysis uses only `year = 4`, representing the **two-year-ahead** horizon, to avoid pooling different forecast horizons.
+
+
+
+```{python}
+#| label: tbl-dataset
+#| tbl-cap: "Selected two-year-horizon dataset"
+dataset_summary = pd.DataFrame([{
+    'Observations': 9792,
+    'Financial predictors': 64,
+    'Bankrupt (class = 1)': '515 (5.26%)',
+    'Non-bankrupt (class = 0)': '9,277 (94.74%)',
+}])
+show_table(dataset_summary)
+
+```
+
+Predictors A1–A64 summarize financial performance and condition, including profitability, liquidity, leverage, turnover and cash-flow ratios. Examples include A1 (net profit / total assets), A2 (total liabilities / total assets), and A3 (working capital / total assets). The horizon identifier was excluded from the predictors; the binary bankruptcy indicator is the target. The data are a single analytical table.
+
+## 3. Cleaning and exploratory data analysis
+
+EDA identified extensive non-random-looking missingness, skewed ratios, extreme values, and highly correlated predictors. A37((current assets - inventories) / long-term liabilities) was missing in approximately **45.36%** of records. Missingness was substantially more common among bankrupt firms for A27(profit on operating activities / financial expenses) (**29.9% versus 5.2%**) and A21 (**21.9% versus 0.5%**), motivating explicit missing-value indicators. A45(net profit / inventory) and A60(sales / inventory) exhibited nearly identical missingness patterns. Financial-ratio outliers were retained because extreme values may reflect genuine financial distress rather than data errors.
+
+The original preprocessing pipeline generated missingness indicators, used median imputation and standard scaling, and selected 30 predictors using ANOVA F-scores. Each learned preprocessing step was fitted within training folds to prevent leakage. Follow-up experiments evaluated whether indicator removal, feature retention and alternative scaling changed predictive performance. Strong Pearson correlations were not used as an automatic reason to delete ratios, especially where Spearman correlations differed.
+
+# Model design, training and initial comparison
+
+## 4. Model selection and rationale
+
+Six classifiers were chosen to cover distinct learning assumptions: **logistic regression** provides an interpretable linear baseline; **KNN** tests local similarity; a **decision tree** captures nonlinear splits; **random forest** reduces individual-tree instability through bagging; **gradient boosting** sequentially corrects residual errors; and **SVM** provides a margin-based nonlinear alternative. These choices were made before observing the results.
+
+## 5. Training, tuning and imbalance treatment
+
+The data were split using a stratified **80/20 train–holdout partition** (7,833 training firms with 412 bankruptcies; 1,959 holdout firms with 103 bankruptcies), random seed 42. Five-fold stratified cross-validation and `GridSearchCV` were used on the training partition, optimizing **average precision (AP)**, the area summary used here for the precision–recall curve. ROC-AUC, precision, recall, F1 and accuracy were also recorded. AP is more informative than accuracy in a dataset with only 5.26% positive cases; a prevalence-level ranking baseline would have AP near 0.053.
+
+Class imbalance was addressed in model evaluation by prioritizing AP and by explicitly searching class-weight options for logistic regression, decision tree, random forest and SVM. The selected initial best settings for these models did not use class weights. No oversampling was performed; thus, imbalance was not eliminated in the training sample. Decision thresholds were investigated separately to assess the practical precision–recall tradeoff.
+
+## 6. Initial six-model results
+
+
+
+```{python}
+#| label: tbl-initial-models
+#| tbl-cap: "Initial five-fold CV model comparison"
+cv = load_table('12_cv_model_comparison.csv')
+cv['model_label'] = cv['model'].map(MODEL_NAMES).fillna(cv['model'])
+initial_table = cv[['model_label', 'cv_pr_auc', 'cv_roc_auc', 'cv_recall', 'cv_f1']].rename(columns={
+    'model_label': 'Model', 'cv_pr_auc': 'CV AP',
+    'cv_roc_auc': 'CV ROC-AUC', 'cv_recall': 'CV recall', 'cv_f1': 'CV F1',
+})
+
+```
+
+
+```{python}
+#| label: fig-initial-models
+#| fig-cap: "Mean five-fold CV average precision for the initial hyperparameter searches (30 selected features)."
+#| fig-width: 8.5
+#| fig-height: 3.0
+plot_data = cv.sort_values('cv_pr_auc', ascending=True)
+fig, ax = plt.subplots(figsize=(8.5, 3.0))
+colors = ['#276b8d' if m == 'GradientBoosting' else '#a6b8c4' for m in plot_data['model']]
+ax.barh(plot_data['model_label'], plot_data['cv_pr_auc'], color=colors)
+for i, value in enumerate(plot_data['cv_pr_auc']):
+    ax.text(value + 0.008, i, f'{value:.3f}', va='center', fontsize=9)
+ax.set_xlim(0, 0.7)
+ax.set_xlabel('Mean 5-fold CV average precision')
+ax.grid(axis='x', alpha=0.2)
+ax.set_axisbelow(True)
+fig.tight_layout()
+fig.savefig(FIGURES / 'report_figure_1_initial_cv_ap.png', dpi=180, bbox_inches='tight')
+plt.show()
+```
+
+```{python}
+show_table(initial_table)
+```
+
+
+Gradient boosting led the initial comparison, narrowly exceeding random forest in AP. The initial boosting grid evaluated **16 combinations (80 fold-fits)**; its selected parameters were 100 estimators, learning rate 0.05, maximum depth 5, and minimum leaf size 20. Training-versus-CV AP gaps were 0.2246 for boosting and 0.3563 for random forest, suggesting substantial fitting capacity and a need for independent holdout validation.
+
+\newpage
+
+# Iterative improvement and final validation
+
+## 7. EDA-driven sensitivity analysis
+
+Keeping the original tuned classifier settings fixed, the training-only sensitivity study varied preprocessing. For gradient boosting, retaining all features increased mean CV AP from **0.5626 to 0.6970**; removing missingness indicators reduced it to **0.4719**. Standard scaling, robust scaling and no scaling all produced approximately 0.5626 when the original 30-feature selection was retained. For random forest, all-feature AP was 0.6218 versus 0.5489 originally. These results suggest that restricting predictors to 30 discarded useful information, and that missingness patterns carry predictive signal in the 30-feature configuration.
+
+## 8. Expanded gradient boosting hyperparameter search
+
+The final experiment retained all 64 financial ratios plus training-derived missingness indicators and removed `SelectKBest`. An expanded grid searched **81 combinations across five folds (405 fits)**: estimators {100, 200, 300}; learning rates {0.03, 0.05, 0.10}; maximum tree depths {2, 3, 5}; and minimum leaf sizes {10, 20, 40}. The best mean CV AP was **0.7283**, with **300 estimators, learning rate 0.10, maximum depth 5, and minimum leaf size 40**. Out-of-fold AP using the selected settings was 0.7282. The expanded model was refitted on the entire training partition before holdout evaluation.
+
+
+```{python}
+#| label: tbl-sensitivity
+#| tbl-cap: "Training-only preprocessing sensitivity, five-fold CV AP"
+sens = load_table('17_ensemble_preprocessing_experiments.csv')
+sens_table = sens.pivot(index='configuration', columns='model', values='cv_pr_auc')
+sens_table = sens_table.reindex(['original', 'no_indicators', 'all_features', 'robust_scaling', 'no_scaling'])
+sens_table = sens_table.rename(columns={'GradientBoosting':'Gradient boosting', 'RandomForest':'Random forest'}).reset_index().rename(columns={'configuration':'Preprocessing'})
+#show_table(sens_table)
+```
+
+
+```{python}
+#| label: tbl-expanded-search
+#| tbl-cap: "Best expanded-grid Gradient Boosting settings"
+search = load_table('21_gb_81_candidate_search.csv')
+best = search.loc[search['mean_test_score'].idxmax()]
+parameter_columns = [
+    'param_clf__n_estimators', 'param_clf__learning_rate',
+    'param_clf__max_depth', 'param_clf__min_samples_leaf'
+]
+search_best = pd.DataFrame([{
+    'CV AP': best['mean_test_score'],
+    'Estimators': int(best[parameter_columns[0]]),
+    'Learning rate': float(best[parameter_columns[1]]),
+    'Max depth': int(best[parameter_columns[2]]),
+    'Min leaf': int(best[parameter_columns[3]]),
+}])
+#show_table(search_best)
+```
+
+
+```{python}
+#| label: tbl-holdout
+#| tbl-cap: "Holdout model comparison and threshold tradeoff"
+# Original model is identified explicitly rather than assuming the first CSV row.
+original_csv = load_table('13_holdout_performance.csv')
+model_col = original_csv.columns[0]
+original_matches = original_csv.loc[original_csv[model_col].astype(str) == 'GradientBoosting']
+original = original_matches.iloc[0] if not original_matches.empty else original_csv.iloc[0]
+expanded = load_table('23_gb_81_candidate_holdout_metrics.csv')
+comparison = load_table('24_gb_expanded_search_comparison.csv')
+
+def metric(row, name):
+    # Older notebook exports sometimes use lower-case metric names.
+    keys = {str(k).strip().lower().replace('_', '-'): k for k in row.index}
+    key = keys.get(name.lower().replace('_', '-'))
+    return float(row[key]) if key is not None else float('nan')
+
+rows = [{
+    'Model / threshold': 'Original GB / 0.50',
+    'AP': metric(original, 'PR-AUC'), 'ROC-AUC': metric(original, 'ROC-AUC'),
+    'Precision': metric(original, 'Precision'), 'Recall': metric(original, 'Recall'),
+    'F1': metric(original, 'F1')
+}]
+prior_file = TABLES / '19_refined_gb_holdout_metrics.csv'
+if prior_file.exists():
+    prior = pd.read_csv(prior_file).iloc[0]
+    rows.append({
+        'Model / threshold': 'All-feature GB / 0.50',
+        'AP': metric(prior, 'PR-AUC'), 'ROC-AUC': metric(prior, 'ROC-AUC'),
+        'Precision': metric(prior, 'Precision'), 'Recall': metric(prior, 'Recall'),
+        'F1': metric(prior, 'F1')
+    })
+for _, r in expanded.iterrows():
+    rows.append({
+        'Model / threshold': 'Expanded GB / ' + f"{float(r['threshold']):.2f}",
+        'AP': metric(r, 'PR-AUC'), 'ROC-AUC': metric(r, 'ROC-AUC'),
+        'Precision': metric(r, 'Precision'), 'Recall': metric(r, 'Recall'),
+        'F1': metric(r, 'F1')
+    })
+holdout_table = pd.DataFrame(rows)
+
+```
+
+```{python}
+#| label: fig-model-improvement
+#| fig-cap: "Training CV and holdout average precision across the three modeling stages. CV results may be optimistic after model selection."
+#| fig-width: 8.5
+#| fig-height: 3.2
+original_cv = float(cv.loc[cv['model'] == 'GradientBoosting', 'cv_pr_auc'].iloc[0])
+all_cv = float(sens.loc[(sens['model'] == 'GradientBoosting') & (sens['configuration'] == 'all_features'), 'cv_pr_auc'].iloc[0])
+expanded_cv = float(best['mean_test_score'])
+
+# Section 13 writes the comparison in the order: original, optional prior all-feature, expanded.
+def comparison_ap(partial_name):
+    matches = comparison.loc[comparison['model'].str.contains(partial_name, case=False, regex=False), 'PR-AUC']
+    return float(matches.iloc[0]) if not matches.empty else np.nan
+
+original_hold = comparison_ap('Original GB')
+all_hold = comparison_ap('Prior all-feature GB')
+expanded_hold = comparison_ap('Expanded 81-candidate')
+
+labels = ['Original (30)', 'All features', 'Expanded 81-grid']
+x = np.arange(len(labels))
+w = 0.34
+fig, ax = plt.subplots(figsize=(8.5, 3.2))
+ax.bar(x - w/2, [original_cv, all_cv, expanded_cv], w, label='Training CV', color='#276b8d')
+ax.bar(x + w/2, [original_hold, all_hold, expanded_hold], w, label='Holdout', color='#8aadc4')
+ax.set_xticks(x, labels)
+ax.set_ylabel('Average precision')
+ax.set_ylim(0, 0.85)
+ax.grid(axis='y', alpha=0.2)
+ax.set_axisbelow(True)
+ax.legend(loc='upper left')
+fig.tight_layout()
+fig.savefig(FIGURES / 'report_figure_2_model_improvement.png', dpi=180, bbox_inches='tight')
+plt.show()
+```
+\newpage
+
+## 9. Independent holdout evaluation
+
+```{python}
+show_table(holdout_table)
+```
+
+The expanded search increased holdout AP by **0.0652** relative to the original model (0.6109 to 0.6761) and improved ROC-AUC from 0.8841 to 0.9201. At threshold 0.50, the final confusion matrix was TN = 1,850, FP = 6, FN = 53 and TP = 50. The training out-of-fold F1 search selected threshold 0.15. Applied to holdout predictions, this threshold yielded TN = 1,828, FP = 28, FN = 45 and TP = 58. Ranking metrics (AP and ROC-AUC) do not change with the classification threshold.
+
+## 10. Interpretation and practical significance
+
+The final model is useful as a risk-ranking and screening tool rather than a definitive bankruptcy detector. At threshold 0.50, **50 of 103 bankruptcies** were identified and **6 non-bankrupt companies** were incorrectly flagged, producing high precision (89.29%) but limited recall (48.54%). Lowering the threshold to 0.15 identified eight additional bankruptcies, at the cost of 22 additional false positives. A screening program prioritizing detection might favor the lower threshold; a resource-constrained review process may favor fewer false alarms. In this holdout sample, the 0.50 threshold also yielded higher F1 than 0.15 (0.6289 versus 0.6138), despite 0.15 maximizing training out-of-fold F1.
+
+## 11. What worked, what did not, and limitations
+
+**Worked:** Gradient boosting outperformed the other initial classifiers on cross-validated AP. Preserving all predictors and their missingness indicators improved performance. The expanded grid further improved both CV and independent holdout discrimination. Median imputation and within-fold transformations provided a reproducible approach to incomplete data.
+
+**Less successful:** The original ANOVA selection of 30 features reduced performance relative to retaining all predictors. Removing missingness indicators also degraded performance. Scaling changes had negligible impact on tree ensembles. Random forest displayed a particularly large train–CV AP gap (0.3563), consistent with overfitting.
+
+**Limitations:** Repeated use of the same CV folds for feature/configuration selection and tuning can make CV estimates optimistic. The final holdout was evaluated after earlier model comparisons, so it should be regarded as a final comparison on this split rather than proof of out-of-sample superiority in other periods or markets. The 103 positive holdout cases also constrain precision of recall estimates. The study did not use external temporal validation, cost-sensitive optimization, probability calibration, or resampling. Financial ratios and bankruptcy outcomes may shift across countries and economic cycles.
+
+## 12. Conclusion and future work
+
+Using 9,792 Polish company observations and 64 financial ratios, the project compared six supervised classifiers for bankruptcy prediction two years ahead. Gradient boosting performed best initially, and EDA-guided revisions materially improved the final model. The expanded 81-candidate all-feature gradient boosting model achieved holdout **AP 0.6761, ROC-AUC 0.9201, and F1 0.6289** at threshold 0.50, well above the 5.26% positive prevalence benchmark for AP. However, recall remained below 50% at that threshold. Future work should prioritize out-of-time validation, calibrated probabilities, cost-sensitive threshold selection, and assessment of missingness stability rather than further tuning on the same split.
+
+## References and reproducibility
+
+UCI Machine Learning Repository. [Polish Companies Bankruptcy Data, dataset 365](https://archive.ics.uci.edu/dataset/365/polish+companies+bankruptcy+data). Zięba, M., Tomczak, S. K., & Tomczak, J. M. (2016). *Ensemble boosted trees with synthetic features generation in application to bankruptcy prediction*. *Expert Systems with Applications*, 58, 93–101. Full code, preprocessing and model outputs: [GitHub repository](https://github.com/kelenosi/Companies_Bankruptcy_Forecast.git).
+
+

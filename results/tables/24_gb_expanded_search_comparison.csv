@@ -1,0 +1,4 @@
+model,PR-AUC,ROC-AUC
+Original GB (30 features),0.6109495240264092,0.884120250251088
+Prior all-feature GB (original hyperparameters),0.6308923156986033,0.8989318295949112
+Expanded 81-candidate all-feature GB,0.6760919797859597,0.9200546116504854
